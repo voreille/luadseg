@@ -1,5 +1,7 @@
 # Data
 /data/
+/logs/
+/checkpoints/
 
 # Mac OS-specific storage files
 .DS_Store

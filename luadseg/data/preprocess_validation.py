@@ -29,9 +29,9 @@ def tile_image(image_id, image_dir, mask_dir, output_dir, tile_size=256):
     image = load_image(image_id, image_dir)
     mask = load_image(image_id, mask_dir)
 
-    output_mask_dir = output_dir / "masks"
+    output_mask_dir = output_dir / "mask"
     output_mask_dir.mkdir(parents=True, exist_ok=True)
-    output_image_dir = output_dir / "images"
+    output_image_dir = output_dir / "image"
     output_image_dir.mkdir(parents=True, exist_ok=True)
 
     image_width, image_height = image.size

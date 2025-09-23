@@ -19,6 +19,25 @@
                 "--output-dir",
                 "/home/valentin/workspaces/luadseg/data/processed/ANORAK_not_resized/validation_tiles_256"
             ]
+        },
+        {
+            "name": "Run tile_anorak CLI",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/luadseg/data/tile_anorak.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--images-dir",
+                "/home/valentin/workspaces/luadseg/data/processed/ANORAK_not_resized/image",
+                "--masks-dir",
+                "/home/valentin/workspaces/luadseg/data/processed/ANORAK_not_resized/mask",
+                "--tile-size",
+                "224",
+                "--resize-factor",
+                "0.5",
+                "--output-dir",
+                "/home/valentin/workspaces/luadseg/data/processed/ANORAK_224_10x/"
+            ]
         }
     ]
 }

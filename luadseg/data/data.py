@@ -12,7 +12,7 @@ class SegDataset(Dataset):
         self.transform = transform
 
     def __len__(self):
-        return len(self.images_filenames)
+        return len(self.image_ids)
 
     def __getitem__(self, idx):
         image_id = self.image_ids[idx]
