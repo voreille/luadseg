@@ -1,0 +1,94 @@
+# One-file config for ANORAK pipeline
+
+project_dir: ${oc.env:PROJECT_DIR,${hydra:runtime.cwd}}
+data_dir: ${oc.env:DATA_DIR,${project_dir}/data}
+embeds_dir: ${oc.env:EMBEDS_DIR,${project_dir}/data/embeds}
+runs_dir: ${oc.env:RUNS_DIR,${project_dir}/runs}
+run_group: ${oc.env:RUN_GROUP,${now:%Y%m%d_%H%M}}
+
+# ----- Run / Hydra -----
+run:
+  seed: 1337
+  out_dir: runs
+  deterministic: true
+
+hydra:
+  run:
+    dir: ${run.out_dir}/${now:%Y%m%d_%H%M%S}_${encoder.name}_${prep.tile_size}_${mag_label}
+  job:
+    chdir: true
+
+# ----- Stage switches -----
+stage_switches:
+  prep: true # make tiles + index.parquet (skipped if exists)
+  embed: true # compute embeddings into HDF5 (skipped if exists)
+  train_eval: true # train CV linear head + metrics
+
+# Human-readable label used in paths (set 10x for 0.5 mpp, 20x for 0.25 mpp, etc.)
+mag_label: 10x
+mpp_map:
+  10x: 1.0
+  20x: 0.5
+  40x: 0.25
+
+# ----- Prep (tiling) -----
+prep:
+  images_dir: ${data_dir}/processed/ANORAK_not_resized/image
+  masks_dir: ${data_dir}/processed/ANORAK_not_resized/mask
+  source_mpp: 0.5 # 20x should not be changed since ANORAK images are at around 0.5 mpp
+  target_mpp: ${mpp_map[${mag_label}]}
+  tile_size: 224
+  stride: 224
+  pad_mode: pad
+  num_classes: 7
+  ignore_label: 0
+  min_foreground_ratio: 0.05
+  min_valid_pixel_ratio: 0.80
+  out_dir: ${data_dir}/tiles/ANORAK/tiles_${prep.tile_size}_${mag_label}_${prep.pad_mode}
+
+# ----- Dataset -----
+dataset:
+  name: anorak
+  root_dir: ${prep.out_dir}
+
+# ----- Encoder -----
+encoder:
+  name: UNI2 # override with -m encoder.name=UNI2,H-optimus-0,...
+  weights: "" # optional custom weights
+  input_size: ${prep.tile_size}
+  mpp: ${prep.target_mpp}
+  device: cuda
+  apply_torch_scripting: true
+
+
+# ----- Embeddings IO -----
+embeddings:
+  name: ${encoder.name}_anorak_${prep.tile_size}_${mag_label}
+  h5_path: ${embeds_dir}/${embeddings.name}/${embeddings.name}.h5
+  write_float32: true
+  batch_size: 256
+  num_workers: 8
+  amp: true
+  resume: true
+  dataset_name: ${dataset.name}
+
+# ----- Evaluation (tile → ratio via linear head) -----
+evaluation:
+  task: ratios
+  tile_head:
+    cv: 5
+    train:
+      epochs: 300
+      lr: 5e-4
+      weight_decay: 1e-4
+      dropout: 0.1
+      temperature: 1.0
+      batch_size: 2048
+      bg_class_weight: null # e.g. 0.2 to downweight background (class 0)
+
+# ----- Logging -----
+logger:
+  backend: mlflow # none | mlflow | wandb
+  project: anorak_ratios
+  tracking_uri: file://${project_dir}/mlflow   # <- one folder, under your repo
+  tags: [ratios, anorak]

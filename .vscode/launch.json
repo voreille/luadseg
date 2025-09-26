@@ -38,6 +38,20 @@
                 "--output-dir",
                 "/home/valentin/workspaces/luadseg/data/processed/ANORAK_224_10x/"
             ]
+        },
+        {
+            "name": "Run ANORAK Hydra pipeline",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/luadseg/run/run_anorak.py",
+            "console": "integratedTerminal",
+            "args": [
+                "--config-path",
+                "${workspaceFolder}/configs",
+                "--config-name",
+                "anorak",
+            ]
         }
+ 
     ]
 }

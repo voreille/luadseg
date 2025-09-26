@@ -1,7 +1,10 @@
 # Data
 /data/
+/runs/
+/multirun/
 /logs/
 /checkpoints/
+/mlflow/
 
 # Mac OS-specific storage files
 .DS_Store

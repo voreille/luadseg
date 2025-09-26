@@ -15,7 +15,7 @@ def load_model(model_name, device, apply_torch_scripting=True):
     """Load the model dynamically based on the model name."""
 
     if model_name == "H-optimus-0":
-        login(token=os.getenv("HUGGING_FACE_TOKEN"))
+        login(token=os.getenv("HF_TOKEN"))
         model = timm.create_model(
             "hf-hub:bioptimus/H-optimus-0",
             pretrained=True,

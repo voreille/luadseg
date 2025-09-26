@@ -1,0 +1,45 @@
+# configs/tasks/ratios_anorak.yaml
+# Task C: predict LUAD pattern ratios at ROI level (ANORAK dataset)
+
+run:
+  seed: 1337
+  out_dir: runs/
+  deterministic: true
+
+logger:
+  backend: "none" # "none" | "wandb" | "mlflow"
+  project: "sslbench"
+  tags: ["ratios", "anorak"]
+
+dataset:
+  name: "anorak"
+  root_dir: "data/tiles/ANORAK/tiles_224_10x_pad"
+
+encoder:
+  name: "UNI2" #
+  weights: ""
+  input_size: 224
+  mpp: 0.5
+  device: "cuda"
+
+embeddings:
+  h5_path: "embeds/uni2_anorak.h5"
+  write_float32: true
+  batch_size: 32
+  num_workers: 8
+  amp: true
+  resume: true
+
+evaluation:
+  task: "ratios"
+  tile_head:
+    type: "linear"
+    params:
+      C_grid: [0.01, 0.1, 1, 10]
+      max_iter: 2000
+      class_weight: "balanced"
+      penalty: "l2"
+      solver: "saga"
+    cv: 5
+  reducer: "expected" # mean of per-tile softmax per class
+  metrics: ["mae", "rmse", "r2", "spearman", "jsd"]
