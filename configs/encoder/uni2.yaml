@@ -1,0 +1,9 @@
+# Friendly id you can reuse in filenames/MLflow tags
+id: uni2
+
+# Hydra instantiation target: returns (encoder, preprocess, emb_dim, autocast_dtype)
+_target_: luadseg.models.loaders.foundation_loader
+
+# Loader-specific kwargs
+name: UNI2
+apply_torch_scripting: true

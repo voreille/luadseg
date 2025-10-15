@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 
 import hydra
+from hydra.utils import instantiate
 from omegaconf import DictConfig, OmegaConf
 
 from luadseg.embed.compute import embed_tiles
@@ -18,7 +19,7 @@ from luadseg.run.utils import should_skip_embed, should_skip_prep
 )
 def main(cfg: DictConfig):
     logger = make_logger(cfg)
-    run_name = f"{cfg.encoder.name}_{cfg.prep.tile_size}_{cfg.mag_label}"
+    run_name = f"{cfg.encoder.id}_{cfg.prep.tile_size}_{cfg.mag_label}"
     tags = {
         "run_group": str(cfg.run_group),
         "encoder": cfg.encoder.name,
@@ -57,17 +58,24 @@ def main(cfg: DictConfig):
         # 2) EMBED
         if cfg.stage_switches.embed and not should_skip_embed(
                 cfg, cfg.encoder.name):
+            encoder, preprocess, emb_dim, autocast_dtype = instantiate(
+                cfg.encoder,
+                # pass runtime fields that can vary by run:
+                device=cfg.encoder_runtime.device,
+                input_size=cfg.encoder_runtime.input_size,
+                mpp=cfg.encoder_runtime.mpp,
+            )
             embed_tiles(
-                encoder_name=cfg.encoder.name,
+                encoder=encoder,
+                preprocess=preprocess,
                 root_dir=Path(cfg.prep.out_dir),
                 out_path=Path(cfg.embeddings.h5_path),
-                weights_path=cfg.encoder.weights or None,
                 batch_size=cfg.embeddings.batch_size,
                 num_workers=cfg.embeddings.num_workers,
-                device=cfg.encoder.device,
-                use_amp=cfg.embeddings.amp,
-                dataset_name=cfg.dataset.name,
-                apply_torch_scripting=cfg.encoder.apply_torch_scripting,
+                device=cfg.encoder_runtime.device,
+                autocast_dtype=autocast_dtype,
+                encoder_metadata=cfg.encoder,
+                embedding_dim=emb_dim,
             )
 
         # 3) TRAIN/EVAL

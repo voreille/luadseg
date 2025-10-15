@@ -1,0 +1,8 @@
+id: moco_r50
+name: resnet50
+_target_: luadseg.models.loaders.tv_models_state_dict_loader
+
+arch: resnet50
+weights: /mnt/nas7/data/Personal/Darya/Checkpoints/superpixel_cluster_clean/no_cluster_round2_queue32768_alpha0.01_beta0.005_epochs100_moco_superpixel/best_model_epoch96.pth
+sd_key: encoder_q         # submodule inside the checkpoint
+strip_prefix: module.     # drop DDP prefixes if any

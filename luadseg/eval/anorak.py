@@ -331,8 +331,10 @@ def run_linear_cv_and_eval(cfg,
             if hasattr(tc, k):
                 setattr(train_cfg, k, getattr(tc, k))
 
-    device = torch.device(cfg.encoder.device if torch.cuda.is_available()
-                          and "cuda" in cfg.encoder.device else "cpu")
+
+    device = torch.device(
+        cfg.encoder_runtime.device if torch.cuda.is_available()
+        and "cuda" in cfg.encoder_runtime.device else "cpu")
 
     # ---- CV loop
     oof_rows: List[pd.DataFrame] = []

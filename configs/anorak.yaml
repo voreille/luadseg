@@ -52,14 +52,14 @@ dataset:
   root_dir: ${prep.out_dir}
 
 # ----- Encoder -----
-encoder:
-  name: UNI2 # override with -m encoder.name=UNI2,H-optimus-0,...
-  weights: "" # optional custom weights
+defaults:
+  - encoder: uni2 # pick default; override with `encoder=moco_r50`
+
+# runtime bits that vary per run and you may want to pass to the loader
+encoder_runtime:
   input_size: ${prep.tile_size}
   mpp: ${prep.target_mpp}
   device: cuda
-  apply_torch_scripting: true
-
 
 # ----- Embeddings IO -----
 embeddings:
@@ -90,5 +90,5 @@ evaluation:
 logger:
   backend: mlflow # none | mlflow | wandb
   project: anorak_ratios
-  tracking_uri: file://${project_dir}/mlflow   # <- one folder, under your repo
+  tracking_uri: file://${project_dir}/mlflow # <- one folder, under your repo
   tags: [ratios, anorak]

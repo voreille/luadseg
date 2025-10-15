@@ -50,8 +50,9 @@
                 "${workspaceFolder}/configs",
                 "--config-name",
                 "anorak",
+                "-m",
+                "encoder=moco_r50",
             ]
         }
- 
     ]
 }

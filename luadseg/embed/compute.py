@@ -7,10 +7,10 @@ import numpy as np
 import pandas as pd
 from PIL import Image
 import torch
+import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
 from luadseg.embed.store import create_embeddings_file, write_embeddings_batch
-from luadseg.models.foundation_models import load_model
 
 
 class IndexDataset(Dataset):
@@ -46,51 +46,45 @@ class IndexDataset(Dataset):
 
 
 def embed_tiles(
-    encoder_name: str,
+    encoder: nn.Module,
+    preprocess: Any,
     root_dir: Path,
     out_path: Path,
-    weights_path: Optional[str] = None,
     batch_size: int = 256,
     num_workers: int = 8,
     device: str = "cuda",
-    use_amp: bool = False,
+    autocast_dtype: Optional[torch.dtype] = None,
     dataset_name: Optional[str] = None,
     logger: Optional[Any] = None,
-    apply_torch_scripting: bool = True,
+    encoder_metadata: Optional[dict] = None,
+    embedding_dim: int = 1536,
 ) -> None:
     """
     Embed tiles using pretrained SSL encoder and save to HDF5.
     
     Args:
-        encoder_name: Name of the encoder (e.g. "UNI2", "H-optimus-0")
-        root_dir: Root directory containing the dataset
-        out_path: Output HDF5 file path
-        weights_path: Optional path to custom weights
-        batch_size: Batch size for inference
-        num_workers: Number of DataLoader workers  
-        device: Device to use ("cuda" or "cpu")
-        use_amp: Whether to use automatic mixed precision
-        dataset_name: Dataset name for metadata
-        logger: Optional logger instance
+        encoder: Pretrained model to use as encoder.
+        preprocess: Preprocessing function for input images.
+        root_dir: Directory with 'index.parquet' and tile images.
+        out_path: Output HDF5 file path.
+        batch_size: Batch size for DataLoader.
+        num_workers: Number of workers for DataLoader.
+        device: Device to run the model on ('cuda' or 'cpu').
+        autocast_dtype: Dtype for automatic mixed precision (e.g., torch.float16).
+        dataset_name: Optional name of the dataset to store in metadata.
+        logger: Optional logger for logging progress.
+        encoder_metadata: Optional metadata dictionary about the encoder.
+        embedding_dim: Dimensionality of the output embeddings.
     """
     if logger is None:
         logger = logging.getLogger(__name__)
 
-    logger.info(f"Loading encoder: {encoder_name}")
+    if encoder_metadata is None:
+        encoder_metadata = {}
 
-    # Create encoder and preprocessing
-    encoder, preprocess, embedding_dim, autocast_dtype = load_model(
-        encoder_name,
-        device=device,
-        apply_torch_scripting=apply_torch_scripting,
-    )
-    # Load custom weights if provided
-    if weights_path:
-        logger.info(f"Loading custom weights from: {weights_path}")
-        encoder.load_state_dict(torch.load(weights_path, map_location=device))
+    logger.info(f"Loading encoder: {encoder_metadata.get('id', 'unknown')}")
 
     encoder.eval()
-    logger.info(f"Encoder loaded. Embedding dimension: {embedding_dim}")
 
     # Create output directories
     out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -107,10 +101,7 @@ def embed_tiles(
     # Initialize HDF5 file
     create_embeddings_file(
         out_path,
-        encoder_metadata={
-            "encoder": encoder_name,
-            "encoder_weights": weights_path
-        },
+        encoder_metadata=dict(encoder_metadata) if encoder_metadata else {},
         dataset_name=dataset_name,
         emb_dim=embedding_dim,
     )
@@ -130,6 +121,8 @@ def embed_tiles(
     all_indices = []
 
     logger.info("Starting embedding computation...")
+
+    use_amp = autocast_dtype is not None
 
     for batch_idx, (images, indices) in enumerate(dataloader):
         images = images.to(device, non_blocking=True)
@@ -170,8 +163,8 @@ def embed_tiles(
         # Save embedding metadata with index mapping
         meta_path = out_path.with_suffix('.meta.json')
         metadata = {
-            "encoder": encoder_name,
-            "encoder_weights": weights_path,
+            "encoder": encoder_metadata.get("name"),
+            "encoder_weights": encoder_metadata.get("weights", "unknown"),
             "dataset_name": dataset_name,
             "num_embeddings": len(all_embeddings),
             "embedding_dim": embedding_dim,
