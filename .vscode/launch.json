@@ -51,7 +51,7 @@
                 "--config-name",
                 "anorak",
                 "-m",
-                "encoder=moco_r50",
+                "encoder=uni2",
             ]
         }
     ]

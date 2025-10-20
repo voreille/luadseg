@@ -65,24 +65,29 @@ def main(cfg: DictConfig):
                 input_size=cfg.encoder_runtime.input_size,
                 mpp=cfg.encoder_runtime.mpp,
             )
+
+            target_stain_img_path = None
+            if cfg.stain_norm.enable:
+                target_stain_img_path = Path(cfg.stain_norm.img_path).resolve()
             embed_tiles(
                 encoder=encoder,
                 preprocess=preprocess,
                 root_dir=Path(cfg.prep.out_dir),
-                out_path=Path(cfg.embeddings.h5_path),
+                out_path=Path(cfg.embeddings.pt_path),
                 batch_size=cfg.embeddings.batch_size,
                 num_workers=cfg.embeddings.num_workers,
                 device=cfg.encoder_runtime.device,
                 autocast_dtype=autocast_dtype,
                 encoder_metadata=cfg.encoder,
                 embedding_dim=emb_dim,
+                target_stain_img=target_stain_img_path,
             )
 
         # 3) TRAIN/EVAL
         if cfg.stage_switches.train_eval:
             run_linear_cv_and_eval(
                 cfg,
-                h5_filepath=cfg.embeddings.h5_path,
+                pt_filepath=cfg.embeddings.pt_path,
                 encoder_name=cfg.encoder.name,
             )
             # log end-of-job artifacts

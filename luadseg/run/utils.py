@@ -26,16 +26,16 @@ def should_skip_prep(cfg) -> bool:
 
 
 def should_skip_embed(cfg, enc_name) -> bool:
-    h5 = Path(cfg.embeddings.h5_path)
-    if not h5.exists():
+    pt_path = Path(cfg.embeddings.pt_path)
+    if not pt_path.exists():
         return False
     try:
-        meta = get_embeddings_metadata(h5)
-        # optional: compare embedding dim or encoder name
-        enc = meta["encoder"]
-        ok = enc.get("encoder") == enc_name
+        import torch
+        data = torch.load(pt_path, map_location="cpu") 
+        enc = data["encoder"]
+        ok = enc.get("name") == enc_name
         if ok:
-            log.info(f"[embed] skip: {h5} already present for {enc_name}")
+            log.info(f"[embed] skip: {pt_path} already present for {enc_name}")
         return ok
     except Exception:
         return False

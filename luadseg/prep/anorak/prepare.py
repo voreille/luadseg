@@ -10,11 +10,13 @@ import pandas as pd
 from PIL import Image, ImageOps
 from tqdm import tqdm
 
+from luadseg.data.constants import ANORAK_CLASS_MAPPING, PATTERN_COLORS
+
 logging.basicConfig(level=logging.INFO, format="%(levelname)s | %(message)s")
 log = logging.getLogger("prepare_anorak")
 
 IMAGE_EXTS = (".png", ".jpg", ".jpeg", ".tif", ".tiff")
-UNVALID_LABEL = 255
+PADDING_LABEL = 255
 
 
 def compute_resize_factor(
@@ -73,7 +75,7 @@ def pad_to_multiple(img: Image.Image, tile: int,
     pad_b = (tile - (h % tile)) % tile
     if pad_r == 0 and pad_b == 0:
         return img, (0, 0)
-    fill = UNVALID_LABEL if is_mask else (255, 255, 255)
+    fill = PADDING_LABEL if is_mask else (255, 255, 255)
     padded = ImageOps.expand(img, border=(0, 0, pad_r, pad_b), fill=fill)
     return padded, (pad_r, pad_b)
 
@@ -109,13 +111,17 @@ def tile_grid(width: int, height: int, tile: int,
     return boxes
 
 
-def bincount_ratios(mask_arr: np.ndarray, num_classes: int,
+def bincount_ratios(mask_arr_flat: np.ndarray, num_classes: int,
                     ignore_label: Optional[int]) -> Tuple[np.ndarray, int]:
-    counts = np.bincount(mask_arr.reshape(-1),
-                         minlength=max(num_classes, (mask_arr.max() + 1)))
-    counts = counts[:num_classes]
-    area = float(mask_arr.size)
-    ratios = counts.astype(np.float64) / (area if area > 0 else 1.0)
+
+    if mask_arr_flat.max() > num_classes - 1 or mask_arr_flat.min() < 0:
+        raise ValueError(
+            f"Mask contains labels outside of valid range [0, {num_classes - 1}]: {mask_arr_flat.min()} - {mask_arr_flat.max()}"
+        )
+    counts = np.bincount(mask_arr_flat, minlength=num_classes)
+
+    area = float(mask_arr_flat.size)
+    ratios = counts.astype(np.float64) / area
     dominant = int(np.argmax(ratios))
     if ignore_label is not None and dominant == ignore_label:
         # pick next best non-ignore if possible
@@ -125,6 +131,43 @@ def bincount_ratios(mask_arr: np.ndarray, num_classes: int,
                 dominant = int(c)
                 break
     return ratios, dominant
+
+
+def get_color_map() -> dict:
+    """Return color map indexed by class ID using the above mappings."""
+
+    color_map = {
+        cls_id: PATTERN_COLORS[name]
+        for cls_id, name in ANORAK_CLASS_MAPPING.items()
+    }
+    color_map.update({255: (255, 255, 255)})
+    return color_map
+
+
+def colorize_mask(mask: Image.Image) -> Image.Image:
+    """Convert class ID mask (H, W) → RGB PIL Image."""
+    np_mask = np.array(mask)
+    color_map = get_color_map()
+    lut = np.zeros((256, 3), dtype=np.uint8)
+    for k, rgb in color_map.items():
+        lut[int(k)] = rgb
+    rgb = lut[np_mask.astype(np.uint8)]
+    return Image.fromarray(rgb, mode="RGB")
+
+
+def overlay_tile_with_mask(tile: Image.Image,
+                           mask: Image.Image,
+                           alpha: float = 0.4) -> Image.Image:
+    """
+    Overlay a colorized mask on top of the original tile for debugging.
+    `alpha` controls transparency of the mask (0 = invisible, 1 = opaque).
+    """
+    colored_mask = colorize_mask(mask).convert("RGBA")
+    tile_rgba = tile.convert("RGBA")
+
+    # blend the two images
+    overlay = Image.blend(tile_rgba, colored_mask, alpha)
+    return overlay
 
 
 def main(
@@ -141,6 +184,7 @@ def main(
         int] = None,  # default None => non-overlapping: stride = tile_size
     pad_mode: str = "pad",  # "pad" (recommended) or "crop"
     save_tiles: bool = True,
+    save_overlay: bool = True,
     num_classes: int = 7,  # adjust to your mask schema
     ignore_label: Optional[int] = 0,  # e.g., 0 = background/tissue
     min_foreground_ratio: float = 0.0,
@@ -152,9 +196,16 @@ def main(
     out_dir_path = Path(out_dir).resolve()
     img_out = out_dir_path / "image"
     msk_out = out_dir_path / "mask"
+    overlay_out = out_dir_path / "overlay"
+    overlay_thumbnail_out = out_dir_path / "overlay_thumbnail"
+
     if save_tiles:
         img_out.mkdir(parents=True, exist_ok=True)
         msk_out.mkdir(parents=True, exist_ok=True)
+
+    if save_overlay:
+        overlay_out.mkdir(parents=True, exist_ok=True)
+        overlay_thumbnail_out.mkdir(parents=True, exist_ok=True)
 
     resize_factor = compute_resize_factor(source_mpp, target_mpp,
                                           resize_factor)
@@ -171,6 +222,7 @@ def main(
         raise FileNotFoundError(f"No images found under {images_dir_path}")
 
     list_no_valid_mask = []
+    tile_count = 0
     for img_path in tqdm(image_files, desc="Tiling"):
         try:
             msk_path = match_mask_for_image(img_path, masks_dir_path)
@@ -211,16 +263,17 @@ def main(
                 msk_tile = msk.crop((x, y, r, b))
                 m_arr = np.array(msk_tile, dtype=np.int32)
 
-                ratios, dominant = bincount_ratios(m_arr,
-                                                   num_classes=num_classes,
-                                                   ignore_label=ignore_label)
-                foreground_ratio = 1.0 - (ratios[ignore_label]
-                                          if ignore_label is not None else 0.0)
-                valid_ratio = np.mean(m_arr != UNVALID_LABEL)
+                valid_ratio = np.mean(m_arr != PADDING_LABEL)
 
                 if valid_ratio <= float(min_valid_pixel_ratio):
                     continue
 
+                ratios, dominant = bincount_ratios(
+                    m_arr[m_arr != PADDING_LABEL],
+                    num_classes=num_classes,
+                    ignore_label=ignore_label)
+                foreground_ratio = 1.0 - (ratios[ignore_label]
+                                          if ignore_label is not None else 0.0)
                 if foreground_ratio <= float(min_foreground_ratio):
                     continue  # skip mostly-background tiles
 
@@ -228,8 +281,8 @@ def main(
 
                 tile_row = (y // (stride if stride else tile_size))
                 tile_col = (x // (stride if stride else tile_size))
-                tile_idx = tile_row * (
-                    W // (stride if stride else tile_size)) + tile_col
+                # tile_idx = tile_row * (
+                #     W // (stride if stride else tile_size)) + tile_col
 
                 tile_id = f"{roi_id}_r{tile_row}_c{tile_col}"
 
@@ -238,6 +291,16 @@ def main(
                     mask_name = f"{tile_id}.png"
                     tile.save(img_out / tile_name, "PNG")
                     msk_tile.save(msk_out / mask_name, "PNG")
+                    if save_overlay:
+                        tile_overlay = overlay_tile_with_mask(tile, msk_tile)
+                        tile_overlay_name = f"{tile_id}__{ANORAK_CLASS_MAPPING[dominant]}.png"
+                        tile_overlay.save(overlay_out / tile_overlay_name,
+                                          "PNG")
+                        tile_overlay_thumbnail = tile_overlay.resize(
+                            (112, 112), Image.Resampling.LANCZOS)
+                        tile_overlay_thumbnail.save(
+                            overlay_thumbnail_out / tile_name, "PNG")
+
                     tile_path = str(
                         (img_out /
                          tile_name).resolve().relative_to(out_dir_path))
@@ -262,7 +325,7 @@ def main(
                     "tile_id":
                     tile_id,
                     "tile_idx":
-                    int(tile_idx),
+                    int(tile_count),
                     "x":
                     int(x + x0),
                     "y":
@@ -286,6 +349,7 @@ def main(
                 for k in range(num_classes):
                     row[f"ratio_{k}"] = float(ratios[k])
                 rows.append(row)
+                tile_count += 1
 
                 # accumulate for ROI-level GT ratios
                 roi_ratio_accum.setdefault(roi_id, []).append(ratios)
@@ -353,8 +417,10 @@ def main(
         for p in list_no_valid_mask:
             f.write(f"{p}\n")
 
+
 def run_prep(cfg):
     main(**cfg)
+
 
 if __name__ == "__main__":
     parser = ArgumentParser(

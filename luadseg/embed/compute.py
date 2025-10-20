@@ -10,20 +10,50 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, Dataset
 
-from luadseg.embed.store import create_embeddings_file, write_embeddings_batch
-
 
 class IndexDataset(Dataset):
     """Dataset that loads tiles from a Parquet index."""
 
-    def __init__(self, root_dir: Path, transform=None):
+    def __init__(self,
+                 root_dir: Path,
+                 transform=None,
+                 target_stain_img: Optional[Path] = None):
         """Initialize dataset from index file."""
         self.root_dir = root_dir
         self.transform = transform
 
+        if target_stain_img is not None:
+            self.target_stain_img = target_stain_img.resolve()
+            self.stain_fn = self._get_stain_fn()
+        else:
+            self.target_stain_img = None
+            self.stain_fn = None
+
         # Load index
         self.index_df = pd.read_parquet(root_dir / "index.parquet")
-        self.index_df.set_index('tile_idx', inplace=True)
+
+    def _get_stain_fn(self):
+        import cv2
+        import torchstain
+        from torchvision import transforms
+
+        target = cv2.cvtColor(
+            cv2.imread(self.target_stain_img),  # type: ignore
+            cv2.COLOR_BGR2RGB)
+
+        T = transforms.Compose(
+            [transforms.ToTensor(),
+             transforms.Lambda(lambda x: x * 255)])
+
+        normalizer = torchstain.normalizers.MacenkoNormalizer(backend='torch')
+        normalizer.fit(T(target))
+
+        def normalize_fn(img):
+            t_to_transform = T(img)
+            norm, H, E = normalizer.normalize(I=t_to_transform, stains=True)
+            return Image.fromarray(norm.numpy().astype(np.uint8))
+
+        return normalize_fn
 
     def __len__(self):
         return len(self.index_df)
@@ -32,7 +62,10 @@ class IndexDataset(Dataset):
         """Load tile image."""
 
         tile_path = self.root_dir / self.index_df.iloc[idx]['tile_path']
+        tile_idx = self.index_df.iloc[idx]['tile_idx']
         image = Image.open(tile_path).convert("RGB")
+        if self.stain_fn:
+            image = self.stain_fn(image)
 
         if self.transform:
             image = self.transform(image)
@@ -42,7 +75,7 @@ class IndexDataset(Dataset):
             to_tensor = transforms.ToTensor()
             image = to_tensor(image)
 
-        return image, idx  # Return index for tracking
+        return image, tile_idx
 
 
 def embed_tiles(
@@ -58,6 +91,7 @@ def embed_tiles(
     logger: Optional[Any] = None,
     encoder_metadata: Optional[dict] = None,
     embedding_dim: int = 1536,
+    target_stain_img: Optional[Path] = None,
 ) -> None:
     """
     Embed tiles using pretrained SSL encoder and save to HDF5.
@@ -66,7 +100,7 @@ def embed_tiles(
         encoder: Pretrained model to use as encoder.
         preprocess: Preprocessing function for input images.
         root_dir: Directory with 'index.parquet' and tile images.
-        out_path: Output HDF5 file path.
+        out_path: Output PT file path for embeddings.
         batch_size: Batch size for DataLoader.
         num_workers: Number of workers for DataLoader.
         device: Device to run the model on ('cuda' or 'cpu').
@@ -91,20 +125,16 @@ def embed_tiles(
 
     # Load dataset index
     logger.info(f"Loading dataset index from: {root_dir / 'index.parquet'}")
-    dataset = IndexDataset(root_dir, transform=preprocess)
+    dataset = IndexDataset(
+        root_dir,
+        transform=preprocess,
+        target_stain_img=target_stain_img,
+    )
     logger.info(f"Found {len(dataset)} tiles in index")
 
     if len(dataset) == 0:
         logger.warning("No tiles found in index")
         return
-
-    # Initialize HDF5 file
-    create_embeddings_file(
-        out_path,
-        encoder_metadata=dict(encoder_metadata) if encoder_metadata else {},
-        dataset_name=dataset_name,
-        emb_dim=embedding_dim,
-    )
 
     # Create dataloader
     dataloader = DataLoader(
@@ -136,7 +166,7 @@ def embed_tiles(
                 embeddings = encoder(images)
 
         # Move to CPU and store
-        embeddings = embeddings.cpu().numpy()
+        embeddings = embeddings.cpu()
         all_embeddings.append(embeddings)
         all_indices.extend(indices.tolist())
 
@@ -145,36 +175,25 @@ def embed_tiles(
 
     # Concatenate all embeddings
     if all_embeddings:
-        all_embeddings = np.concatenate(all_embeddings, axis=0)
-        logger.info(f"Generated {len(all_embeddings)} embeddings")
+        all_embeddings = torch.cat(all_embeddings, dim=0)
+        all_indices = torch.tensor(all_indices, dtype=torch.int32)
+        order = torch.argsort(all_indices)
+        all_embeddings = all_embeddings[order]
+        all_indices = all_indices[order]
 
-        # For ANORAK (no splits), store everything under 'all' split
-        split_name = "all"
-
-        # Write to HDF5
-        write_embeddings_batch(
+        torch.save(
+            {
+                "embeddings": all_embeddings,
+                "tile_idx": all_indices,
+                "encoder": encoder_metadata,
+                "dataset_name": dataset_name,
+                "root_dir": str(root_dir),
+            },
             out_path,
-            split=split_name,
-            embeddings=all_embeddings,
         )
 
-        logger.info(f"Saved embeddings to: {out_path}")
-
-        # Save embedding metadata with index mapping
-        meta_path = out_path.with_suffix('.meta.json')
-        metadata = {
-            "encoder": encoder_metadata.get("name"),
-            "encoder_weights": encoder_metadata.get("weights", "unknown"),
-            "dataset_name": dataset_name,
-            "num_embeddings": len(all_embeddings),
-            "embedding_dim": embedding_dim,
-            "root_dir": str(root_dir),
-            "split": split_name,
-        }
-
-        with open(meta_path, 'w') as f:
-            json.dump(metadata, f, indent=2)
-
-        logger.info(f"Saved metadata to: {meta_path}")
+        logger.info(f"Saved {len(all_embeddings)} embeddings to {out_path}")
+    else:
+        logger.warning("No embeddings were generated.")
 
     logger.info("Embedding completed successfully!")

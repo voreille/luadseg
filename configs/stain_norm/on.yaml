@@ -1,0 +1,4 @@
+enable: true
+img_name: train046_Da777
+img_path: ${prep.images_dir}/${stain_norm.img_name}.png
+name_suffix: _SN-${stain_norm.img_name}

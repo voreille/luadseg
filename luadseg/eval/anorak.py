@@ -3,7 +3,6 @@ import json
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import h5py
 import numpy as np
 import pandas as pd
 from scipy.stats import pearsonr, spearmanr
@@ -11,6 +10,7 @@ from sklearn.cluster import KMeans
 from sklearn.model_selection import StratifiedGroupKFold
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from tqdm import tqdm
 
 # -----------------------
@@ -35,26 +35,21 @@ class HeadTrainCfg:
 # -----------------------
 
 
-def _load_embeddings_matrix(h5_path: Path, split: str = "all") -> np.ndarray:
-    with h5py.File(h5_path, "r") as f:
-        try:
-            E = f[f"embeddings/{split}/E"][:]  # type: ignore
-        except KeyError:
-            # backward-compat: allow top-level /embeddings/E
-            E = f["embeddings/E"][:]  # type: ignore
-    if not isinstance(E, np.ndarray):
-        E = np.array(E)
-    return E.astype(np.float32, copy=False)
+def _load_embeddings_matrix(pt_path: Path) -> tuple[np.ndarray, np.ndarray]:
+    data = torch.load(pt_path)
+    embeddings = data["embeddings"]  # Tensor [N, D]
+    indices = data["tile_idx"]
+    return embeddings.numpy(), indices.numpy()
 
 
 def _load_index(dataset_root: Path) -> pd.DataFrame:
     idx_path_parquet = dataset_root / "index.parquet"
     if idx_path_parquet.exists():
-        return pd.read_parquet(idx_path_parquet)
+        return pd.read_parquet(idx_path_parquet).set_index('tile_idx')
     # Fallback to CSV if user chose CSV
     idx_path_csv = dataset_root / "index.csv"
     if idx_path_csv.exists():
-        return pd.read_csv(idx_path_csv)
+        return pd.read_csv(idx_path_csv).set_index('tile_idx')
     raise FileNotFoundError(
         f"index.parquet (or index.csv) not found in {dataset_root}")
 
@@ -106,6 +101,52 @@ def _dist_ce_loss(logits: torch.Tensor,
     if class_weight is not None:
         loss = loss * class_weight.view(1, -1)
     return loss.sum(dim=1).mean()
+
+
+def _rmse_loss(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    class_weight: Optional[torch.Tensor] = None,
+    eps: float = 1e-12,
+) -> torch.Tensor:
+    """
+    Root Mean Squared Error (RMSE) between predicted and target ratios.
+    - Takes logits (not softmaxed)
+    - Applies softmax to get probabilities
+    - Supports optional per-class weighting
+    """
+    # convert logits to probabilities
+    p = logits.softmax(dim=1)
+
+    # ensure targets are normalized (sum=1)
+    target = target / (target.sum(dim=1, keepdim=True) + eps)
+
+    # per-class squared error
+    loss = (p - target)**2  # (N, C)
+
+    # apply per-class weights if given
+    if class_weight is not None:
+        loss = loss * class_weight.view(1, -1)
+
+    # mean over classes and samples, then sqrt
+    return torch.sqrt(loss.mean() + eps)
+
+
+def _kl_div_loss(logits: torch.Tensor,
+                 target: torch.Tensor,
+                 class_weight: Optional[torch.Tensor] = None,
+                 eps: float = 1e-12) -> torch.Tensor:
+    """
+    KL(target || pred) using logits directly:
+    pred = softmax(logits)
+    loss = sum_c target_c * (log target_c - log pred_c)
+    """
+    logp = F.log_softmax(logits, dim=1)  # log(p)
+    t = torch.clamp(target, min=eps)
+    loss_mat = t * (t.log() - logp)
+    if class_weight is not None:
+        loss_mat = loss_mat * class_weight.view(1, -1)
+    return loss_mat.sum(dim=1).mean()
 
 
 @torch.no_grad()
@@ -178,6 +219,22 @@ def _summarize_metrics(per_class: Dict[str, np.ndarray]) -> Dict[str, float]:
 # -----------------------
 
 
+def soft_to_hard_labels_torch(Y: torch.Tensor,
+                              bg_thresh: float = 0.9,
+                              fg_thresh: float = 0.1) -> torch.Tensor:
+    """
+    Convert soft ratio targets (N, C) to integer class labels (0..C-1).
+    """
+    bg = Y[:, 0]
+    non_bg_max, _ = Y[:, 1:].max(dim=1)
+    cond = (bg < bg_thresh) & (non_bg_max > fg_thresh)
+    labels = torch.zeros(len(Y), dtype=torch.long, device=Y.device)
+    labels[cond] = Y[cond].argmax(dim=1)
+    num_classes = Y.shape[1]
+
+    return F.one_hot(labels, num_classes=num_classes).to(Y.device)
+
+
 def _fit_one_fold(
     X: np.ndarray, Y: np.ndarray, tr_idx: np.ndarray, va_idx: np.ndarray,
     cfg: HeadTrainCfg, device: torch.device
@@ -220,6 +277,17 @@ def _fit_one_fold(
     Y_tr = torch.from_numpy(Y[tr_idx])
     X_va = torch.from_numpy(X[va_idx]).to(device)
     Y_va = torch.from_numpy(Y[va_idx]).to(device)
+    Y_tr = soft_to_hard_labels_torch(Y_tr)
+    # Y_va = soft_to_hard_labels_torch(Y_va)
+
+    y_mean = Y_tr.to(torch.float32).mean(dim=0)  # (C,)
+    class_weight = 1.0 / (y_mean + 1e-8)
+    class_weight = class_weight / class_weight.mean()  # optional normalization
+    class_weight = class_weight.to(device)
+    criterion = torch.nn.CrossEntropyLoss(
+        weight=class_weight)  # cw is optional class weight
+    Y_tr = torch.argmax(Y_tr, dim=1)  # convert to integer labels for CE loss
+    # Y_va = torch.argmax(Y_va, dim=1)  # convert to integer labels for CE loss
 
     for _ in range(cfg.epochs):
         model.train()
@@ -227,7 +295,10 @@ def _fit_one_fold(
             xb = X_tr[b_idx].to(device, non_blocking=True)
             yb = Y_tr[b_idx].to(device, non_blocking=True)
             logits = model(xb)
-            loss = _dist_ce_loss(logits, yb, class_weight=cw)
+            # loss = _dist_ce_loss(logits, yb, class_weight=class_weight)
+            # loss = _kl_div_loss(logits, yb, class_weight=class_weight)
+            # loss = _rmse_loss(logits, yb, class_weight=class_weight)
+            loss = criterion(logits, yb)
             opt.zero_grad(set_to_none=True)
             loss.backward()
             opt.step()
@@ -260,7 +331,7 @@ def _fit_one_fold(
 
 
 def run_linear_cv_and_eval(cfg,
-                           h5_filepath: str,
+                           pt_filepath: str,
                            encoder_name: str,
                            save_full_fit: bool = True) -> Dict[str, str]:
     """
@@ -276,12 +347,12 @@ def run_linear_cv_and_eval(cfg,
 
     # paths
     dataset_root = Path(cfg.dataset.root_dir)
-    h5_path = Path(h5_filepath)
+    pt_path = Path(pt_filepath)
     out_heads = Path("heads")
     out_heads.mkdir(parents=True, exist_ok=True)
 
     # ---- load data
-    X = _load_embeddings_matrix(h5_path, split="all")  # [N, D]
+    X, _ = _load_embeddings_matrix(pt_path)  # [N, D]
     index_df = _load_index(dataset_root)  # rows: tiles, same order as X
     # num classes from config or infer from columns
     if hasattr(cfg.prep, "num_classes"):
@@ -295,6 +366,11 @@ def run_linear_cv_and_eval(cfg,
     missing = [c for c in ratio_cols if c not in index_df.columns]
     if missing:
         raise ValueError(f"Missing ratio columns in index.parquet: {missing}")
+
+    # correcting bg for possible padding
+    ratio_cols_wo_bg = [f"ratio_{i}" for i in range(1, C)]
+    index_df["ratio_0"] = 1.0 - index_df[ratio_cols_wo_bg].sum(axis=1)
+
     Y = index_df[ratio_cols].to_numpy(dtype=np.float32)  # [N, C]
     groups = index_df["roi_id"].to_numpy()
 
@@ -330,7 +406,6 @@ def run_linear_cv_and_eval(cfg,
         ]:
             if hasattr(tc, k):
                 setattr(train_cfg, k, getattr(tc, k))
-
 
     device = torch.device(
         cfg.encoder_runtime.device if torch.cuda.is_available()

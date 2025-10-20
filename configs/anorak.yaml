@@ -2,7 +2,7 @@
 
 project_dir: ${oc.env:PROJECT_DIR,${hydra:runtime.cwd}}
 data_dir: ${oc.env:DATA_DIR,${project_dir}/data}
-embeds_dir: ${oc.env:EMBEDS_DIR,${project_dir}/data/embeds}
+embeds_dir: ${oc.env:EMBEDS_DIR,${project_dir}/data/embeds/ANORAK}
 runs_dir: ${oc.env:RUNS_DIR,${project_dir}/runs}
 run_group: ${oc.env:RUN_GROUP,${now:%Y%m%d_%H%M}}
 
@@ -38,7 +38,7 @@ prep:
   source_mpp: 0.5 # 20x should not be changed since ANORAK images are at around 0.5 mpp
   target_mpp: ${mpp_map[${mag_label}]}
   tile_size: 224
-  stride: 224
+  stride: ${prep.tile_size} # non-overlapping
   pad_mode: pad
   num_classes: 7
   ignore_label: 0
@@ -54,6 +54,7 @@ dataset:
 # ----- Encoder -----
 defaults:
   - encoder: uni2 # pick default; override with `encoder=moco_r50`
+  - stain_norm: "off"
 
 # runtime bits that vary per run and you may want to pass to the loader
 encoder_runtime:
@@ -63,8 +64,8 @@ encoder_runtime:
 
 # ----- Embeddings IO -----
 embeddings:
-  name: ${encoder.name}_anorak_${prep.tile_size}_${mag_label}
-  h5_path: ${embeds_dir}/${embeddings.name}/${embeddings.name}.h5
+  name: ${encoder.name}_anorak_${prep.tile_size}_${mag_label}${stain_norm.name_suffix}
+  pt_path: ${embeds_dir}/${embeddings.name}/${embeddings.name}.pt
   write_float32: true
   batch_size: 256
   num_workers: 8
@@ -78,7 +79,7 @@ evaluation:
   tile_head:
     cv: 5
     train:
-      epochs: 300
+      epochs: 1000
       lr: 5e-4
       weight_decay: 1e-4
       dropout: 0.1
